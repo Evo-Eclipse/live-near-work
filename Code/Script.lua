@@ -7,14 +7,17 @@
 LiveNearWork = {
     Settings = {
         enabled = true,
-        debug_log = false,
-        shift_start_hours = {6, 14, 22},
-        min_comfort_difference = -10,
-        optimize_within_dome = true,
-        proximity_bonus_max = 50,
-        proximity_distance_scale = 1000,
-        intra_dome_threshold = 10,
-        relocation_delay = 500
+        debug = false,
+        -- Triggers
+        trigger_hours = {6, 14, 22},
+        scan_delay = 500, 
+        -- Rules
+        allow_intra_dome = true,
+        max_comfort_loss = -10,
+        min_intra_score = 10,
+        -- Scoring
+        dist_score_max = 50,
+        dist_score_step = 1000
     }
 }
 
@@ -23,13 +26,13 @@ local LNW = LiveNearWork
 -- MARK: - Logging
 
 local function Log(msg, always)
-    if always or LNW.Settings.debug_log then
+    if always or LNW.Settings.debug then
         print("[LNW] " .. tostring(msg))
     end
 end
 
 local function LogTable(rows)
-    if not LNW.Settings.debug_log or #rows == 0 then
+    if not LNW.Settings.debug or #rows == 0 then
         return
     end
 
@@ -202,15 +205,15 @@ local function FindBestResidence(colonist, dome, exclude)
                 local score = res.service_comfort or 0
 
                 -- Penalty for significant comfort decrease
-                if score - cur_comfort < settings.min_comfort_difference then
+                if score - cur_comfort < settings.max_comfort_loss then
                     score = score - 1000
                 end
 
                 -- Bonus for proximity to workplace
                 -- Dist2D returns distance in game units
-                if settings.optimize_within_dome and wp_pos then
+                if settings.allow_intra_dome and wp_pos then
                     local dist = res:GetPos():Dist2D(wp_pos)
-                    local bonus = settings.proximity_bonus_max - dist / settings.proximity_distance_scale
+                    local bonus = settings.dist_score_max - dist / settings.dist_score_step
                     score = score + math.max(0, bonus)
                 end
 
@@ -289,7 +292,7 @@ local function ProcessRelocationInternal()
             goto skip
         end
 
-        if not is_inter and not settings.optimize_within_dome then
+        if not is_inter and not settings.allow_intra_dome then
             goto skip
         end
 
@@ -332,11 +335,11 @@ local function ProcessRelocationInternal()
                 cur_score = c.cur_res.service_comfort or 0
                 if IsValid(c.colonist.workplace) then
                     local dist = c.cur_res:GetPos():Dist2D(c.colonist.workplace:GetPos())
-                    local bonus = settings.proximity_bonus_max - dist / settings.proximity_distance_scale
+                    local bonus = settings.dist_score_max - dist / settings.dist_score_step
                     cur_score = cur_score + math.max(0, bonus)
                 end
             end
-            if best_score <= cur_score + settings.intra_dome_threshold then
+            if best_score <= cur_score + settings.min_intra_score then
                 goto next
             end
         end
@@ -410,11 +413,11 @@ end
 -- MARK: - Event Handlers
 
 function OnMsg.NewHour(hour)
-    for _, h in ipairs(LNW.Settings.shift_start_hours) do
+    for _, h in ipairs(LNW.Settings.trigger_hours) do
         if hour == h then
             CreateGameTimeThread(function()
                 -- Delay to let colonists settle into their shifts
-                Sleep(LNW.Settings.relocation_delay)
+                Sleep(LNW.Settings.scan_delay)
                 ProcessRelocation()
             end)
             break
@@ -430,5 +433,5 @@ function OnMsg.LoadGame() Log("LNW active", true) end
 function LNW.Run() ProcessRelocation() end
 function LNW.Enable() LNW.Settings.enabled = true; Log("Enabled", true) end
 function LNW.Disable() LNW.Settings.enabled = false; Log("Disabled", true) end
-function LNW.DebugEnable() LNW.Settings.debug_log = true; Log("Debug: true", true) end
-function LNW.DebugDisable() LNW.Settings.debug_log = false; Log("Debug: false", true) end
+function LNW.DebugEnable() LNW.Settings.debug = true; Log("Debug: true", true) end
+function LNW.DebugDisable() LNW.Settings.debug = false; Log("Debug: false", true) end

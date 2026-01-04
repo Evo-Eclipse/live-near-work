@@ -1,7 +1,7 @@
 -- Live Near Work for Surviving Mars Relaunched
 -- Auto-relocates colonists closer to their workplace
 -- Author: Evo-Eclipse@github
--- Version: 1.1
+-- Version: 1.2
 
 -- MARK: - Configuration
 LiveNearWork = {
@@ -10,7 +10,7 @@ LiveNearWork = {
         debug = false,
         -- Triggers
         trigger_hours = {6, 14, 22},
-        scan_delay = 500, 
+        scan_delay = 500,
         -- Rules
         allow_intra_dome = true,
         max_comfort_loss = -10,
@@ -25,122 +25,95 @@ local LNW = LiveNearWork
 
 -- MARK: - Logging
 
+-- Prints a message to console if debug mode is enabled or 'always' flag is set
 local function Log(msg, always)
-    if always or LNW.Settings.debug then
-        print("[LNW] " .. tostring(msg))
-    end
+    if always or LNW.Settings.debug then print("[LNW] " .. tostring(msg)) end
 end
 
+-- Prints a formatted table of relocation results (only in debug mode)
 local function LogTable(rows)
-    if not LNW.Settings.debug or #rows == 0 then
-        return
-    end
+    if not LNW.Settings.debug or #rows == 0 then return end
 
-    local w = {
-        s = 6,
-        n = 24,
-        d = 26,
-        h = 32,
-        r = 20
-    }
-
+    local fmt = "%-6s  %-24s  %-26s  %-32s  %-20s"
     print("")
-    print(string.format("%-" .. w.s .. "s  %-" .. w.n .. "s  %-" .. w.d .. "s  %-" .. w.h .. "s  %-" .. w.r .. "s",
-        "Status", "Colonist", "Dome Transfer", "Residence Transfer", "Reason"))
-    print(string.rep("-", w.s) .. "  " .. string.rep("-", w.n) .. "  " .. string.rep("-", w.d) .. "  " ..
-              string.rep("-", w.h) .. "  " .. string.rep("-", w.r))
+    print(fmt:format("Status", "Colonist", "Dome Transfer", "Residence Transfer", "Reason"))
+    print(("-"):rep(116))
 
-    for _, r in ipairs(rows) do
-        print(string.format("%-" .. w.s .. "s  %-" .. w.n .. "s  %-" .. w.d .. "s  %-" .. w.h .. "s  %-" .. w.r .. "s",
-            r.status, r.name, r.domes, r.homes, r.reason))
+    for _, row in ipairs(rows) do
+        print(fmt:format(row.status, row.name, row.domes, row.homes, row.reason))
     end
     print("")
 end
 
 -- MARK: - Utilities
 
+-- Returns a display name for any game object or a placeholder if invalid
 local function GetName(obj)
-    if not obj then
-        return "---"
-    end
-    if type(obj) == "string" then
-        return obj
-    end
-    if IsValid(obj) and obj.GetDisplayName then
-        return _InternalTranslate(obj:GetDisplayName())
-    end
+    if not obj then return "---" end
+    if type(obj) == "string" then return obj end
+    if IsValid(obj) and obj.GetDisplayName then return _InternalTranslate(obj:GetDisplayName()) end
     return obj.class or "???"
 end
 
+-- Formats colonist info as "Name [Spec]" for logging
+local SpecShort = {
+    engineer = "Eng",
+    scientist = "Sci",
+    medic = "Med",
+    security = "Sec",
+    geologist = "Geo",
+    botanist = "Bot",
+    none = "-"
+}
+
 local function FormatColonist(colonist)
-    if not IsValid(colonist) then
-        return "???"
-    end
-    local spec_short = {
-        engineer = "Eng",
-        scientist = "Sci",
-        medic = "Med",
-        security = "Sec",
-        geologist = "Geo",
-        botanist = "Bot",
-        none = "-"
-    }
-    return string.format("%s [%s]", GetName(colonist), spec_short[colonist.specialist] or "-")
+    if not IsValid(colonist) then return "???" end
+    return ("%s [%s]"):format(GetName(colonist), SpecShort[colonist.specialist] or "-")
 end
 
 -- MARK: - Game Queries
 
+-- Returns the dome where colonist's workplace is located
 local function GetWorkplaceDome(colonist)
-    local wp = colonist.workplace
-    return IsValid(wp) and (wp.parent_dome or wp.dome) or nil
+    local workplace = colonist.workplace
+    return IsValid(workplace) and (workplace.parent_dome or workplace.dome) or nil
 end
 
+-- Returns the dome where colonist currently lives
 local function GetResidenceDome(colonist)
-    local res = colonist.residence
-    return IsValid(res) and (res.parent_dome or res.dome) or colonist.dome
+    local residence = colonist.residence
+    return IsValid(residence) and (residence.parent_dome or residence.dome) or colonist.dome
 end
 
--- Check if a colonist can live in a residence
+-- Checks if a colonist can live in a specific residence
 -- Uses game's native properties: children_only, exclusive_trait
 local function CanLiveIn(colonist, residence)
-    if not IsValid(residence) then
-        return false, "invalid"
-    end
-    if not residence.ui_working then
-        return false, "disabled"
-    end
+    if not IsValid(residence) or not residence.ui_working then return false end
 
     local traits = colonist.traits or {}
-
-    -- Check children_only residences (Nursery, etc.)
     local is_child = traits.Child
-    if residence.children_only and not is_child then
-        return false, "children_only"
-    end
-    if is_child and not residence.children_only then
-        return false, "need_nursery"
-    end
+
+    -- Children can only live in children_only residences (Nursery)
+    -- Adults cannot live in children_only residences
+    if residence.children_only ~= (is_child and true or false) then return false end
 
     -- Check exclusive_trait (Tourist hotels, Senior residences, etc.)
-    if residence.exclusive_trait and not traits[residence.exclusive_trait] then
-        return false, "exclusive_" .. residence.exclusive_trait
-    end
+    if residence.exclusive_trait and not traits[residence.exclusive_trait] then return false end
 
-    -- Check if colonist is a Tourist trying to enter non-tourist housing
-    if traits.Tourist and residence.exclusive_trait ~= "Tourist" then
-        return false, "tourist_needs_hotel"
-    end
+    -- Tourists can only stay in Tourist-exclusive residences
+    if traits.Tourist and residence.exclusive_trait ~= "Tourist" then return false end
 
-    return true, "ok"
+    return true
 end
 
 -- MARK: - Relocation Plan
 
--- Plan for handling cross-relocations (A: X→Y and B: Y→X simultaneously)
+-- Plan structure for handling cross-relocations
+-- (e.g., colonist A: X→Y and colonist B: Y→X simultaneously)
 local Plan = {
-    moves = {},
-    reserved = {},
-    vacating = {}
+    moves = {},     -- List of planned moves
+    reserved = {},  -- Spaces reserved in target residences (by handle)
+    vacating = {}   -- Spaces being freed in source residences (by handle)
 }
 
 local function ClearPlan()
@@ -151,232 +124,214 @@ local function ClearPlan()
     }
 end
 
--- Get available space accounting for planned moves
-local function GetPlanFreeSpace(res)
-    if not IsValid(res) then
-        return 0
-    end
-    local h = res.handle
-    return res:GetFreeSpace() - (Plan.reserved[h] or 0) + (Plan.vacating[h] or 0)
+-- Returns available space in residence, accounting for planned moves
+local function GetPlanFreeSpace(residence)
+    if not IsValid(residence) then return 0 end
+    local handle = residence.handle
+    local reserved = Plan.reserved[handle] or 0
+    local vacating = Plan.vacating[handle] or 0
+    return residence:GetFreeSpace() - reserved + vacating
 end
 
-local function AddToPlan(colonist, from_res, to_res, to_dome, reason)
+-- Adds a colonist move to the plan and updates space tracking
+local function AddToPlan(colonist, from_residence, to_residence, to_dome, reason)
     table.insert(Plan.moves, {
         colonist = colonist,
-        from_res = from_res,
-        to_res = to_res,
+        from_res = from_residence,
+        to_res = to_residence,
         to_dome = to_dome,
         reason = reason
     })
-    Plan.reserved[to_res.handle] = (Plan.reserved[to_res.handle] or 0) + 1
-    if IsValid(from_res) then
-        Plan.vacating[from_res.handle] = (Plan.vacating[from_res.handle] or 0) + 1
+
+    -- Reserve a space in the target residence
+    local to_handle = to_residence.handle
+    Plan.reserved[to_handle] = (Plan.reserved[to_handle] or 0) + 1
+
+    -- Mark a space as being vacated in the source residence
+    if IsValid(from_residence) then
+        local from_handle = from_residence.handle
+        Plan.vacating[from_handle] = (Plan.vacating[from_handle] or 0) + 1
     end
 end
 
 -- MARK: - Residence Search
 
--- Find the best residence in a dome
--- Score = comfort + proximity_bonus (configurable via Settings)
--- Proximity bonus: max at dist=0, 0 at dist>=max_dist (linear interpolation)
-local function FindBestResidence(colonist, dome, exclude)
-    if not IsValid(dome) then
-        return nil, 0, "no_dome"
+-- Calculates a score for a residence based on comfort and proximity to workplace
+-- Higher score = better residence for this colonist
+local function CalcResidenceScore(residence, workplace_pos, base_comfort)
+    local settings = LNW.Settings
+    local score = residence.service_comfort or 0
+
+    -- Penalty for significant comfort decrease (makes this residence less desirable)
+    if score - base_comfort < settings.max_comfort_loss then
+        score = score - 1000
     end
+
+    -- Bonus for proximity to workplace (linear: max points at dist=0, 0 at max distance)
+    if settings.allow_intra_dome and workplace_pos then
+        local distance = residence:GetPos():Dist2D(workplace_pos)
+        local proximity_bonus = settings.dist_score_max - distance / settings.dist_score_step
+        score = score + math.max(0, proximity_bonus)
+    end
+
+    return score
+end
+
+-- Finds the best available residence in a dome for a colonist
+-- Returns: best_residence, best_score (or nil, 0 if none found)
+local function FindBestResidence(colonist, dome, exclude_residence)
+    if not IsValid(dome) then return nil, 0 end
 
     local residences = dome.labels and dome.labels.Residence or {}
-    if #residences == 0 then
-        return nil, 0, "no_housing"
-    end
+    if #residences == 0 then return nil, 0 end
 
-    local best, best_score, reject_reason = nil, -999999, "no_space"
-    local cur_comfort = exclude and exclude.service_comfort or 0
-    local wp_pos = IsValid(colonist.workplace) and colonist.workplace:GetPos()
-    local settings = LNW.Settings
+    local best_residence = nil
+    local best_score = -999999
+    local base_comfort = exclude_residence and exclude_residence.service_comfort or 0
+    local workplace_pos = IsValid(colonist.workplace) and colonist.workplace:GetPos()
 
-    for _, res in ipairs(residences) do
-        if res ~= exclude then
-            local can, reason = CanLiveIn(colonist, res)
-            if not can then
-                reject_reason = reason
-            elseif GetPlanFreeSpace(res) <= 0 then
-                reject_reason = "no_space"
-            else
-                local score = res.service_comfort or 0
-
-                -- Penalty for significant comfort decrease
-                if score - cur_comfort < settings.max_comfort_loss then
-                    score = score - 1000
-                end
-
-                -- Bonus for proximity to workplace
-                -- Dist2D returns distance in game units
-                if settings.allow_intra_dome and wp_pos then
-                    local dist = res:GetPos():Dist2D(wp_pos)
-                    local bonus = settings.dist_score_max - dist / settings.dist_score_step
-                    score = score + math.max(0, bonus)
-                end
-
-                if score > best_score then
-                    best_score, best = score, res
-                end
+    for _, residence in ipairs(residences) do
+        -- Skip current residence, incompatible residences, and full residences
+        if residence ~= exclude_residence and CanLiveIn(colonist, residence) and GetPlanFreeSpace(residence) > 0 then
+            local score = CalcResidenceScore(residence, workplace_pos, base_comfort)
+            if score > best_score then
+                best_score = score
+                best_residence = residence
             end
         end
     end
 
-    return best, best_score, best and "ok" or reject_reason
-end
-
-local function AddToPlan(colonist, from_res, to_res, to_dome, reason)
-    table.insert(Plan.moves, {
-        colonist = colonist,
-        from_res = from_res,
-        to_res = to_res,
-        to_dome = to_dome,
-        reason = reason
-    })
-    Plan.reserved[to_res.handle] = (Plan.reserved[to_res.handle] or 0) + 1
-    if IsValid(from_res) then
-        Plan.vacating[from_res.handle] = (Plan.vacating[from_res.handle] or 0) + 1
-    end
+    return best_residence, best_score
 end
 
 -- MARK: - Main Process
 
--- Check if colonist should be skipped from relocation
+-- Checks if a colonist should be skipped from relocation processing
 local function ShouldSkipColonist(colonist)
-    if not IsValid(colonist) then
-        return true, "invalid"
-    end
-    if colonist:IsDying() or colonist.leaving then
-        return true, "dying_or_leaving"
-    end
-    if colonist.command == "Transport" or colonist.command == "TransportByFoot" then
-        return true, "in_transport"
-    end
-    -- Skip tourists - they have their own housing logic
-    if colonist.traits and colonist.traits.Tourist then
-        return true, "tourist"
-    end
-    -- user_forced_residence is a table {residence, GameTime()} or nil
-    if colonist.user_forced_residence then
-        return true, "user_forced"
-    end
-    return false, nil
+    if not IsValid(colonist) or colonist:IsDying() or colonist.leaving then return true end
+
+    -- Skip colonists currently in transport
+    local command = colonist.command
+    if command == "Transport" or command == "TransportByFoot" then return true end
+
+    -- Skip tourists - they have their own housing logic via hotels
+    local traits = colonist.traits
+    if traits and traits.Tourist then return true end
+
+    -- Skip colonists with manually assigned residence (user_forced_residence is {residence, GameTime()})
+    if colonist.user_forced_residence then return true end
+
+    return false
 end
 
+-- Main relocation processing logic (called via pcall for error safety)
 local function ProcessRelocationInternal()
     ClearPlan()
+
     local results = {}
-    local inter, intra = 0, 0
+    local inter_dome_count = 0
+    local intra_dome_count = 0
     local settings = LNW.Settings
 
-    -- Collect and filter candidates
+    -- Phase 1: Collect candidates for relocation
     local candidates = {}
+
     for _, colonist in ipairs(UICity.labels.Colonist or {}) do
-        local skip, reason = ShouldSkipColonist(colonist)
-        if skip then
-            goto skip
+        if not ShouldSkipColonist(colonist) then
+            local workplace_dome = GetWorkplaceDome(colonist)
+
+            if IsValid(workplace_dome) then
+                local residence_dome = GetResidenceDome(colonist)
+                local is_inter_dome = workplace_dome ~= residence_dome
+
+                -- For inter-dome moves: verify domes are connected (passage/shuttle)
+                -- For intra-dome moves: only process if enabled in settings
+                local should_process = false
+                if is_inter_dome then
+                    should_process = AreDomesConnected(residence_dome, workplace_dome)
+                else
+                    should_process = settings.allow_intra_dome
+                end
+
+                if should_process then
+                    table.insert(candidates, {
+                        colonist = colonist,
+                        target_dome = workplace_dome,
+                        current_residence = colonist.residence,
+                        priority = is_inter_dome and 2 or 1,  -- Inter-dome = higher priority
+                        move_type = is_inter_dome and "workplace" or "distance"
+                    })
+                end
+            end
         end
-
-        local wp_dome = GetWorkplaceDome(colonist)
-        if not IsValid(wp_dome) then
-            goto skip
-        end
-
-        local res_dome = GetResidenceDome(colonist)
-        local is_inter = wp_dome ~= res_dome
-
-        -- For inter-dome moves, verify domes are connected
-        if is_inter and not AreDomesConnected(res_dome, wp_dome) then
-            goto skip
-        end
-
-        if not is_inter and not settings.allow_intra_dome then
-            goto skip
-        end
-
-        table.insert(candidates, {
-            colonist = colonist,
-            target = wp_dome,
-            cur_res = colonist.residence,
-            priority = is_inter and 2 or 1,
-            type = is_inter and "workplace" or "distance"
-        })
-        ::skip::
     end
 
-    -- Inter-dome relocations first (priority 2)
+    -- Sort candidates: inter-dome moves first (priority 2), then intra-dome (priority 1)
     table.sort(candidates, function(a, b)
         return a.priority > b.priority
     end)
 
-    -- Planning phase
-    for _, c in ipairs(candidates) do
-        local best, best_score, reason = FindBestResidence(c.colonist, c.target, c.cur_res)
-        local from_dome = GetResidenceDome(c.colonist)
+    -- Phase 2: Plan moves
+    for _, candidate in ipairs(candidates) do
+        local colonist = candidate.colonist
+        local best_residence, best_score = FindBestResidence(colonist, candidate.target_dome, candidate.current_residence)
+        local from_dome = GetResidenceDome(colonist)
 
-        if not best or GetPlanFreeSpace(best) <= 0 then
-            -- SKIP: no suitable housing available
+        if not best_residence or GetPlanFreeSpace(best_residence) <= 0 then
+            -- No suitable housing available
             table.insert(results, {
                 status = "SKIP",
-                name = FormatColonist(c.colonist),
-                domes = GetName(from_dome) .. " -> " .. GetName(c.target),
-                homes = GetName(c.cur_res) .. " -> ???",
-                reason = best and "plan_full" or reason
+                name = FormatColonist(colonist),
+                domes = GetName(from_dome) .. " -> " .. GetName(candidate.target_dome),
+                homes = GetName(candidate.current_residence) .. " -> ???",
+                reason = "no_space"
             })
-            goto next
-        end
-
-        -- For intra-dome moves, verify significant improvement
-        if c.priority == 1 then
-            local cur_score = 0
-            if IsValid(c.cur_res) then
-                cur_score = c.cur_res.service_comfort or 0
-                if IsValid(c.colonist.workplace) then
-                    local dist = c.cur_res:GetPos():Dist2D(c.colonist.workplace:GetPos())
-                    local bonus = settings.dist_score_max - dist / settings.dist_score_step
-                    cur_score = cur_score + math.max(0, bonus)
-                end
+        elseif candidate.priority == 1 then
+            -- Intra-dome move: only proceed if improvement is significant
+            local current_score = 0
+            if IsValid(candidate.current_residence) then
+                local workplace_pos = IsValid(colonist.workplace) and colonist.workplace:GetPos()
+                current_score = CalcResidenceScore(candidate.current_residence, workplace_pos, 0)
             end
-            if best_score <= cur_score + settings.min_intra_score then
-                goto next
-            end
-        end
 
-        AddToPlan(c.colonist, c.cur_res, best, c.target, c.type)
-        if c.priority == 2 then
-            inter = inter + 1
+            if best_score > current_score + settings.min_intra_score then
+                AddToPlan(colonist, candidate.current_residence, best_residence, candidate.target_dome, candidate.move_type)
+                intra_dome_count = intra_dome_count + 1
+            end
         else
-            intra = intra + 1
+            -- Inter-dome move: always proceed if housing available
+            AddToPlan(colonist, candidate.current_residence, best_residence, candidate.target_dome, candidate.move_type)
+            inter_dome_count = inter_dome_count + 1
         end
-        ::next::
     end
 
-    -- Execution phase
-    for _, m in ipairs(Plan.moves) do
-        local colonist, to_res, to_dome = m.colonist, m.to_res, m.to_dome
+    -- Phase 3: Execute planned moves
+    for _, move in ipairs(Plan.moves) do
+        local colonist = move.colonist
+        local to_residence = move.to_res
+        local to_dome = move.to_dome
 
-        -- Verify objects are still valid and space is available
-        if IsValid(colonist) and IsValid(to_res) and to_res:GetFreeSpace() > 0 then
-            local from_dome, from_res = colonist.dome, m.from_res
+        -- Final validation before execution
+        if IsValid(colonist) and IsValid(to_residence) and to_residence:GetFreeSpace() > 0 then
+            local from_dome = colonist.dome
+            local from_residence = move.from_res
 
-            -- Clear user-forced residence (it's a table {residence, time} or nil)
+            -- Clear any user-forced residence flag
             colonist.user_forced_residence = nil
 
             -- Set dome first, then residence
-            -- Note: SetDome internally calls SetResidence(false), so order matters
+            -- Note: SetDome() internally calls SetResidence(false), so order matters
             if IsValid(to_dome) and from_dome ~= to_dome then
                 colonist:SetDome(to_dome)
             end
-            colonist:SetResidence(to_res)
+            colonist:SetResidence(to_residence)
 
             table.insert(results, {
                 status = "OK",
                 name = FormatColonist(colonist),
                 domes = GetName(from_dome) .. " -> " .. GetName(to_dome),
-                homes = GetName(from_res) .. " -> " .. GetName(to_res),
-                reason = m.reason
+                homes = GetName(from_residence) .. " -> " .. GetName(to_residence),
+                reason = move.reason
             })
         end
     end
@@ -385,24 +340,22 @@ local function ProcessRelocationInternal()
     LogTable(results)
 
     local ok_count = 0
-    for _, r in ipairs(results) do
-        if r.status == "OK" then
+    for _, result in ipairs(results) do
+        if result.status == "OK" then
             ok_count = ok_count + 1
         end
     end
 
     if ok_count > 0 then
-        Log(string.format("Done: %d relocated (%d inter-dome, %d intra-dome)", ok_count, inter, intra), true)
+        Log(("Done: %d relocated (%d inter-dome, %d intra-dome)"):format(ok_count, inter_dome_count, intra_dome_count), true)
     elseif #results > 0 then
-        Log(string.format("Done: 0 relocated, %d skipped", #results))
+        Log(("Done: 0 relocated, %d skipped"):format(#results))
     end
 end
 
 -- Safe wrapper with error handling
 local function ProcessRelocation()
-    if not LNW.Settings.enabled or not UICity then
-        return
-    end
+    if not LNW.Settings.enabled or not UICity then return end
 
     local ok, err = pcall(ProcessRelocationInternal)
     if not ok then
@@ -413,10 +366,9 @@ end
 -- MARK: - Event Handlers
 
 function OnMsg.NewHour(hour)
-    for _, h in ipairs(LNW.Settings.trigger_hours) do
-        if hour == h then
+    for _, trigger_hour in ipairs(LNW.Settings.trigger_hours) do
+        if hour == trigger_hour then
             CreateGameTimeThread(function()
-                -- Delay to let colonists settle into their shifts
                 Sleep(LNW.Settings.scan_delay)
                 ProcessRelocation()
             end)
@@ -431,7 +383,23 @@ function OnMsg.LoadGame() Log("LNW active", true) end
 -- MARK: - Public API
 
 function LNW.Run() ProcessRelocation() end
-function LNW.Enable() LNW.Settings.enabled = true; Log("Enabled", true) end
-function LNW.Disable() LNW.Settings.enabled = false; Log("Disabled", true) end
-function LNW.DebugEnable() LNW.Settings.debug = true; Log("Debug: true", true) end
-function LNW.DebugDisable() LNW.Settings.debug = false; Log("Debug: false", true) end
+
+function LNW.Enable()
+    LNW.Settings.enabled = true
+    Log("Enabled", true)
+end
+
+function LNW.Disable()
+    LNW.Settings.enabled = false
+    Log("Disabled", true)
+end
+
+function LNW.DebugEnable()
+    LNW.Settings.debug = true
+    Log("Debug: true", true)
+end
+
+function LNW.DebugDisable()
+    LNW.Settings.debug = false
+    Log("Debug: false", true)
+end

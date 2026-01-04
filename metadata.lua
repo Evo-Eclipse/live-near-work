@@ -1,5 +1,5 @@
 return PlaceObj('ModDef', {
-	'title', "live-near-work",
+	'title', "Live Near Work",
 	'id', "cUmUwA",
 	'author', "Evo 1",
 	'version', 1,
